@@ -1,0 +1,16 @@
+build/
+obj_dir/
+__pycache__/
+.pytest_cache/
+*.pyc
+
+# Vivado and Vitis
+*.jou
+*.log
+*.str
+.Xil/
+*.cache/
+*.runs/
+*.sim/
+*.hw/
+*.ip_user_files/
