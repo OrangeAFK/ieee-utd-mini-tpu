@@ -1,0 +1,366 @@
+# Verification
+
+Every module is verified at the lowest level that can see its bugs, against one reference: the golden model in Contract 1. A module is done when the checks in its section below pass in CI, not when it is written.
+
+## 1. Levels
+
+| Level | What runs | Reference | Catches | Where |
+| --- | --- | --- | --- | --- |
+| L0 Static | Verilator lint on every RTL file; Vivado synthesis of each module on its own | No lint warnings; the expected DSP, block RAM and carry-chain counts | Width mismatches, latches, wrong inference | Lint in CI; synthesis locally, report committed |
+| L1 Unit | One self-checking bench per module | A model written inside the bench, or golden vectors | Logic and timing bugs inside one module | CI |
+| L2 Integration | `tb_accel_top` with register and stream models | Layer vectors from the golden model | Interface and alignment bugs between modules | CI; long random run locally |
+| L3 Post-synthesis | Synthesis of `accel_top`; one simulation of the netlist | Resource counts, timing, the same layer vector | Simulation and synthesis disagreeing; timing | Vivado, locally |
+| L4 Board | The driver on hardware | Golden output over UART; counters from simulation | DMA, cache, clocking, anything physical | Board |
+
+CI runs Verilator only. Vivado runs locally; commit its reports next to the module.
+
+## 2. Rules every bench follows
+
+1. **Self-checking.** It ends by printing PASS or by calling `$fatal`. Nobody passes a test by reading a waveform.
+2. **An independent reference.** Expected values come from golden vectors, or from a behavioural model written from the docs without looking at the RTL.
+3. **Seeded randomness.** Every random test prints its seed and accepts `+seed=` to replay a failure.
+4. **Random backpressure** on both sides of every valid/ready interface.
+5. **Reset in the middle.** Each bench resets the module during an operation at least once, then runs a clean case.
+6. **No unknowns.** Outputs are checked for X whenever their valid is high.
+7. **Cover counters.** Each "must hit" case is a counter in the bench. The test fails if one is still zero at the end.
+8. **A regression test per bug.** A bug found at a higher level gets a unit test that reproduces it before the fix merges.
+
+Keep assertions to immediate, single-clock forms so Verilator and the Vivado simulator both run them.
+
+## 3. Running
+
+```
+python tb/run.py lint             # Verilator lint on every RTL module
+python tb/run.py sim              # build and run every bench
+python tb/run.py sim tb_ub        # one bench
+python tb/run.py sim tb_mxu -- +seed=7
+```
+
+`tb/run.py` finds every `tb_*.sv` under `tb/`, builds it with Verilator together with all of `rtl/` and `tb/common/`, and runs it from the repository root, so vector paths start with `vectors/`. A bench passes when it prints `PASS` or `SKIP` and exits cleanly. `tb_pe` runs for PIPE = 0 and 1; `tb_mxu` runs for T = 4 and 8 crossed with PIPE = 0 and 1.
+
+Every bench starts with:
+
+```systemverilog
+$display("SKIP: not implemented"); $finish;
+```
+
+CI treats SKIP as a pass. The owner deletes that line in the pull request that makes the bench real.
+
+## 4. Shared bench components
+
+Every unit bench has the same shape: one module in the middle, stream or register models on its ports, checkers watching the interfaces.
+
+| Component | File | What it does |
+| --- | --- | --- |
+| Stream source | `tb/common/axis_src/axis_src.sv` | Plays a hex image or queued words onto a stream with random `tvalid` gaps; never changes data while waiting |
+| Stream sink | `tb/common/axis_sink/axis_sink.sv` | Collects words with random `tready`; records where `tlast` fell |
+| Register master | `tb/common/axil_master/axil_master.sv` | `write(addr, data)` and `read(addr, data)` tasks, with random delay between address and data channels |
+| Stream checker | `tb/common/axis_check/axis_check.sv` | Asserts that `tvalid` holds until `tready`, and that data and `tlast` are stable while waiting |
+| MXU checker | `tb/common/mxu_check/mxu_check.sv` | Asserts Contract 4 |
+| Bench utilities | `tb/common/tb_pkg.sv` | Seed handling, hex loading, compare-and-report, cover counters |
+| Vectors | `vectors/` | Tile, epilogue and layer sets, plus 50 random small layers |
+
+The MXU checker is used in three benches: on the array itself, on the FSM that drives it, and inside the top level. It asserts:
+
+- `shift_en` is high for exactly T consecutive cycles per burst.
+- `in_valid` is never high during a burst.
+- The first shift cycle comes at least FLUSH_LAT cycles after the last `in_valid`.
+- `res_valid` is high for exactly T cycles, starting SHIFT_LAT cycles after `shift_en` rises.
+- `res_row` holds no X while `res_valid` is high.
+
+## 5. Vectors
+
+Every `.hex` file is plain text for `$readmemh`: one value per line, most significant digit first, no prefix. Negative numbers are masked to the field width before printing. Files are generated by `python -m model.gen_vectors` and never edited by hand.
+
+| File | Lines | Each line |
+| --- | --- | --- |
+| `tile_<name>_a.hex` | K | Activation word, 16 digits |
+| `tile_<name>_w.hex` | K | Weight word, 16 digits |
+| `tile_<name>_bias.hex` | 8 | INT32 bias for channel c, 8 digits |
+| `tile_<name>_res.hex` | 8 | Result row for channel c, 64 digits, lane j in bits [32j+31 : 32j] |
+| `epi_<name>_in.hex` | any | One result-buffer entry, 70 digits: `{1'b0, last, s[5:0], M0[15:0], row[255:0]}` |
+| `epi_<name>_out.hex` | same | Expected output word, 16 digits |
+| `epi_<name>_cfg.hex` | 3 | z, lo, hi, 2 digits each |
+| `layer_<name>_a.hex`, `_w.hex`, `_o.hex` | image length | One image word, 16 digits |
+| `layer_<name>_cfg.hex` | 6 | M_TILES, K, N_TILES, z, lo, hi, 8 digits each |
+
+| Set | Contents | Used by |
+| --- | --- | --- |
+| `tile_k1`, `tile_k2`, `tile_k9`, `tile_k300` | Random full-range INT8, random INT32 bias | `tb_mxu` |
+| `tile_corner` | Every operand −128, K = 300 | `tb_mxu` |
+| `epi_corners` | Sums at and beyond ±2^24, s = 1 and 47, M0 = 0 and 65,535, exact ties, clamps hit on both sides | `tb_epilogue` |
+| `epi_random` | 1,000 random entries | `tb_epilogue` |
+| `layer_single` | M = 8, K = 9, N = 8 | `tb_accel_top` |
+| `layer_mid` | M = 16, K = 64, N = 16 | `tb_accel_top` |
+| `layer_demo1` | M = 64, K = 784, N = 128; random weights until the trained model is exported | `tb_accel_top` |
+| `layer_demo2`, `layer_demo3` | The other two layers of the trained model | `tb_accel_top`, board |
+| `layer_rand_00` to `layer_rand_49` | M_T and N_T from 1 to 4, K from 1 to 64 | `tb_accel_top` |
+| `sw/demo/data/reorder_test.h` | An `o_img` and its expected `a_next` as C arrays | `tpu_reorder` host test |
+
+## 6. Per-module plans
+
+Each entry lists the bench, the bugs it is most likely to have, the directed tests, the random test, the assertions, the cases that must be hit, the static check, and the exit criterion. Each directed test and the random test is a named task in the bench.
+
+### 6.1 pe
+
+- **Bench.** `tb/mxu/pe/tb_pe.sv` drives the six inputs directly. The reference is a three-stage model in the bench using 64-bit integers.
+- **Most likely bugs.** An unsigned multiply; a latency other than 3; accumulate winning over shift; the adder built in LUTs.
+- **Random test.** 200,000 cycles with a random pair every cycle, `shift` high one cycle in 16, and a random 48-bit `c_in`. `p` is compared with the model every cycle.
+- **Assertions.** `p` is never X after reset. With PIPE = 1, `a_out` equals the previous cycle's `a_in`, and the same for `w_out`.
+- **Must hit.** All four sign quadrants; a zero operand; accumulate then shift, and shift then accumulate, on consecutive cycles; `p` negative; `p` beyond ±2^31.
+- **Static check.** Synthesized alone: one DSP48E1, no CARRY4, and the DSP's A, B, M and P registers all enabled.
+- **Done when** the directed and random tests pass for PIPE = 0 and 1 and the static check is committed.
+
+Directed tests:
+
+1. Reset gives `p` = 0, and it stays 0 with zero inputs.
+2. All 65,536 (a, w) pairs, one product each, checked 3 cycles later.
+3. The four extreme pairs (−128 and 127 in each position), each accumulated 1,000 times, to exercise growth past 16 and 24 bits.
+4. Shift: `p` follows `c_in` one cycle later for positive, negative and all-ones 48-bit values.
+5. Shift during traffic: a product reaching the P stage during a shift cycle is dropped, and accumulation resumes correctly on the next cycle.
+6. `a_out` and `w_out` have the delay PIPE says they should.
+
+### 6.2 mxu
+
+- **Bench.** `tb/mxu/mxu/tb_mxu.sv` has one driver task, `run_tile`, that obeys Contract 4 with programmable gaps. `mxu_check` watches the array. The reference is `tile()` rewritten in SystemVerilog with 64-bit integers, plus the `tile_*` vector sets. Everything runs for T = 4 and 8 and for PIPE = 0 and 1.
+- **Most likely bugs.** Skew off by one; the channel reversal applied to the byte but not to its delay; biases loaded in the wrong order; residue from the previous tile; activations not forced to zero when `in_valid` is low.
+- **Random test.** 2,000 tiles: K uniform from 1 to 64, plus K = 300 and K = 1,024 once each; full-range INT8; random INT32 bias; a 30% chance of a gap after any word; 0 to 5 extra idle cycles before the shift.
+- **Assertions.** Everything in `mxu_check`.
+- **Must hit.** A nonzero sum in every lane j and every channel c; positive and negative sums; a sum beyond ±2^16; back-to-back tiles at the minimum gap; a gap in `in_valid` inside a tile; K = 1.
+- **Static check.** At T = 8: 64 DSP48E1, no CARRY4 inside any `pe`, timing met at 8.000 ns, reported for both PIPE settings, with LUTs, flip-flops, worst slack, and whether the P chain used the dedicated DSP cascade.
+- **Done when** all four parameter combinations pass and FLUSH_LAT and SHIFT_LAT in `mxu_pkg` equal what test 7 measured.
+
+Directed tests:
+
+1. Bias only: two shift bursts with no words between. The second returns the bias in all 8 lanes, channels in order.
+2. One-hot: a single 1 in activation byte j0 and weight byte c0. Only `res[c0][j0]` changes. All 64 pairs.
+3. K = 1 and K = 2.
+4. Residue: a tile of large values followed by a bias-only tile. The second returns only its bias.
+5. Gating: hold `a_word` nonzero while `in_valid` is low through the whole settle phase. The sums do not change.
+6. Minimum gaps: shift exactly FLUSH_LAT after the last word, next word the cycle after the burst, for 100 tiles, a different bias per tile.
+7. FLUSH_LAT is tight: with the checker off, repeat a tile with the gap one cycle short and confirm the last PE's sum is wrong. This proves the constant is neither too small nor padded.
+8. Reset in the middle of a tile, then a clean tile.
+9. Every `tile_*` vector set.
+
+### 6.3 ub
+
+- **Bench.** `tb/ctrl/ub/tb_ub.sv`. The reference is a plain array in the bench, written in step with the DUT.
+- **Most likely bugs.** A read latency other than RD_LAT; the write pointer not resetting; the memory built from LUTs instead of block RAM; a missing output register.
+- **Random test.** 50,000 operations: random data with random gaps in `wr_valid` during the fill, then random read addresses, a new one every cycle. Every read is checked exactly RD_LAT cycles later.
+- **Assertions.** The write pointer never passes 8,192. `rd_data` is not X, RD_LAT cycles after reading an address that was written.
+- **Must hit.** Address 0 and address 8,191 written and read; reads on consecutive cycles; the same address read twice in a row; `wr_rst` in the middle of a fill.
+- **Static check.** Synthesized alone: 16 RAMB36E1, no LUT RAM, output registers on.
+- **Done when** the tests pass and the block RAM count is 16.
+
+Directed tests:
+
+1. Fill all 8,192 words with a value derived from the address, then read every word back in order.
+2. Read in the pattern the FSM uses: base + k for k = 0 to K − 1, for several bases and K values.
+3. Assert `wr_rst` halfway through a fill, refill, and check that the second image is the one stored.
+4. Change the read address every cycle and confirm no read is lost or repeated.
+
+### 6.4 wload
+
+`wload` does nothing useful alone, so its bench instantiates `wb_pair` too.
+
+- **Bench.** `tb/ctrl/wload/tb_wload.sv`. A stream source plays a `w_img`. A consumer model waits a random time after `nxt_valid`, pulses `swap`, then reads the whole active half and the CURRENT parameters, and compares them with the block it expects from the image.
+- **Most likely bugs.** Parameter fields decoded from the wrong bits; a block one word too long or short; a write into the half being read; CURRENT and NEXT crossed after a swap; `blocks_left` off by one, so the loader takes one block too many or too few.
+- **Random test.** 200 layers: K from 1 to 1,024, N_T from 1 to 8, random `tvalid` gaps, random swap delay.
+- **Assertions.** `s_ready` is low whenever `nxt_valid` is high. A write never targets the active half. `nxt_valid` falls only on `swap`. `active` changes only on `swap`. Exactly K + 8 words are accepted per block. No word is accepted in L_IDLE or L_HOLD.
+- **Must hit.** Every loader state; a stall inside the parameter words and inside the weight words; a swap on the first possible cycle; a swap after a long wait; the final block of a layer.
+- **Static check.** 4 RAMB36E1 with `wb_pair`; the two parameter sets in flip-flops.
+- **Done when** the tests pass and every assertion has been seen active at least once.
+
+Directed tests:
+
+1. K = 1, and K = 1,024, which fills a half exactly.
+2. N_T = 1: one block, one swap, and the loader returns to idle.
+3. N_T = 3 with a swap as soon as each block is ready.
+4. Parameter words with every field at its minimum and maximum, including a negative bias.
+5. Extra words after the final block are not accepted: `s_ready` stays low.
+6. The stream offered before `start`: nothing is accepted until `start`.
+
+### 6.5 wb_pair
+
+- **Bench.** `tb/ctrl/wb_pair/tb_wb_pair.sv` drives the write port, `active` and `raddr` directly. The reference is two plain arrays in the bench.
+- **Most likely bugs.** Writes landing in the active half; reads from the idle half; a read latency other than RD_LAT; the two halves sharing an address bit wrongly.
+- **Random test.** 50,000 cycles: random writes into the idle half, a random read address every cycle, and `active` flipped at random while no read is in flight. Every read is checked RD_LAT cycles later.
+- **Assertions.** `rdata` is not X, RD_LAT cycles after reading an address written in the active half.
+- **Must hit.** Addresses 0 and 1,023 in both halves; a write and a read in the same cycle; a flip of `active` followed at once by a read.
+- **Static check.** Synthesized alone: 4 RAMB36E1, no LUT RAM.
+- **Done when** the tests pass and the block RAM count is 4.
+
+Directed tests:
+
+1. Fill the idle half, flip `active`, read every word back in order.
+2. While reading the active half, write a different pattern into the idle half. The reads do not change.
+3. Change `raddr` every cycle and confirm each word arrives exactly RD_LAT cycles after its address.
+4. Write both halves with distinct patterns through two flips, then read both back.
+
+### 6.6 res_buf
+
+- **Bench.** `tb/ctrl/res_buf/tb_res_buf.sv`. A burst generator sends 8-row bursts with the two flags; a consumer pops at random. The reference is a SystemVerilog queue.
+- **Most likely bugs.** The scale taken from the wrong channel index; the index not advancing during a discarded burst; the `last` bit on the wrong row; pointer errors at full and empty; `can_take_tile` off by one.
+- **Random test.** 10,000 bursts, sent only when `can_take_tile` is high, with random pop stalls and a 10% chance that a burst is a discard.
+- **Assertions.** No push when full and no pop when empty. The fill count never passes 16. `can_take_tile` equals "at least 8 free".
+- **Must hit.** Full at 16; empty; a push and a pop in the same cycle; a discarded burst followed at once by a real one; a burst with `rb_last`.
+- **Static check.** No block RAM; the storage is LUT RAM.
+- **Done when** the tests pass.
+
+Directed tests:
+
+1. A discarded burst leaves the buffer empty.
+2. Two bursts back to back fill it to 16, and `can_take_tile` drops after the first row of the second.
+3. Each row comes out with the scale of its own channel: use 8 different `cur_m0` and `cur_sh` values.
+4. Change `cur_m0` and `cur_sh` on the cycle after a burst ends. The stored rows keep the old values.
+5. With `rb_last` high, only the eighth row of the burst carries `last`.
+
+### 6.7 epilogue
+
+The only block with real arithmetic outside the array, so it gets the heaviest numerical testing.
+
+- **Bench.** `tb/ctrl/epilogue/tb_epilogue.sv`. A source presents entries with the `rb_valid` and `rb_pop` handshake; a sink applies random `of_ready`. Two references: the `epi_*` vector sets, and a function in the bench that implements Contract 1 with 64-bit integers for the random test.
+- **Most likely bugs.** The saturation boundary off by one; rounding wrong for negative values or exact ties; the multiplier treating M0 as signed; the clamp compared after truncating to 8 bits; bytes or lanes in the wrong order; a word lost or duplicated when the pipeline stalls.
+- **Random test.** 100,000 entries. Half the sums are uniform over INT32 and half lie within ±300 of ±2^24. M0 is uniform with 0 and 65,535 forced in; `sh` from 1 to 47; random `qz`, `qlo`, `qhi` with `qlo` ≤ `qhi`; random stalls.
+- **Assertions.** One output word per popped entry. `ep_valid` and `ep_word` hold until `of_ready`. `rb_pop` only when `rb_valid`. No X on `ep_word` when valid.
+- **Must hit.** Saturation high and low; the clamp low, high and not at all; `sh` = 1 and `sh` = 47; M0 = 0; an exact tie; a negative result; a stall on each of the 4 steps; an entry with `last` = 1.
+- **Static check.** 2 DSP48E1 and no multiplier built from LUTs.
+- **Done when** every vector line matches, the random test passes on three seeds, and the rate test passes. The random test against the in-bench reference comes first; the vector test follows once `epi_*` sets exist.
+
+Directed tests:
+
+1. `epi_corners` and `epi_random`.
+2. Lane order: an entry with one nonzero sum, in each of the 8 positions. Only that byte of the word changes.
+3. Sums of 2^24 − 1, 2^24, −2^24 and −2^24 − 1, to pin both saturation edges.
+4. A value exactly half-way between two outputs, positive and negative. Both round toward plus infinity.
+5. `qlo` = `qhi`: every byte equals that value.
+6. Rate: 8 entries offered at once with `of_ready` held high leave as 8 words within 32 cycles plus the pipeline depth.
+7. `last` on an entry appears on exactly that entry's word.
+
+### 6.8 out_fifo
+
+- **Bench.** `tb/ctrl/out_fifo/tb_out_fifo.sv` with a word source, the stream sink and `axis_check` on `m_axis`. The reference is a queue.
+- **Most likely bugs.** First-word fall-through timing; `tlast` one word early or late; `tvalid` dropping before `tready`; `last_sent` longer than one cycle.
+- **Random test.** 100,000 words with random stalls on both sides and `last` on random words.
+- **Assertions.** Everything in `axis_check`. No write when full. `last_sent` is high for one cycle, exactly when the `tlast` word is accepted. `ev_out_word` equals `tvalid & tready`.
+- **Must hit.** Full at 512; empty; write and read in the same cycle; `last` on the first word after empty.
+- **Static check.** 1 RAMB36E1.
+- **Done when** the tests pass.
+
+Directed tests:
+
+1. Fill to 512 with the sink stalled; `of_ready` drops; drain and compare all 512 in order.
+2. A single word through an empty FIFO appears on `m_axis` without an extra request.
+3. A word with `last`: `tlast` rises with that word only, and `last_sent` pulses once.
+
+### 6.9 regfile
+
+- **Bench.** `tb/ctrl/regfile/tb_regfile.sv` with `axil_master` and simple generators for the status and event inputs. The reference is a register model in the bench.
+- **Most likely bugs.** An AXI4-Lite handshake that only works when address and data arrive together; self-clearing bits that stick; START accepted while busy or with an illegal shape; counters that do not clear; DONE not sticky.
+- **Random test.** 20,000 reads and writes to random offsets with random delays on all five channels, checked against the register model.
+- **Assertions.** A write response only after both address and data were accepted. A read response only after the address was accepted. Every response is OKAY. `start`, `soft_reset` and `ub_wr_rst` are one cycle wide. `start` never rises while `busy` is high.
+- **Must hit.** Every register written and read; address before data, data before address, and both together; a stalled response channel; each of the four reasons START is refused.
+- **Static check.** No DSP and no block RAM.
+- **Done when** the tests pass.
+
+Directed tests:
+
+1. Reset values of every register.
+2. Walking ones through every writable field; reserved bits read zero; writes to read-only registers change nothing.
+3. A legal START gives a one-cycle pulse, clears DONE, ERROR and all counters.
+4. START with K = 0, K = 1,025, M_TILES = 0 or N_TILES = 0 gives no pulse and sets ERROR.
+5. START while `busy` is high gives no pulse.
+6. DEST keeps its level across other CTRL writes that include it; UB_WR_RST pulses once.
+7. `done_set` sets DONE and it stays set until the next START.
+8. Each counter: hold its enable high for N cycles, read back N. CNT_CYCLES counts cycles with `busy` high.
+9. CAPS reads the constants from `mxu_pkg`.
+
+### 6.10 layer_fsm
+
+The FSM is tested alone first, because a sequencing bug seen only at the top level is slow to find.
+
+- **Bench.** `tb/ctrl/layer_fsm/tb_layer_fsm.sv`. Small models stand in for the neighbours: `nxt_valid` rises a random time after each `swap`, `can_take_tile` toggles at random, and `last_sent` pulses a random time after the final shift. A monitor records every read address, shift burst, bias choice, flag and swap. The reference is a schedule model: a plain nested loop in the bench that lists the events a layer of that shape must produce, in order.
+- **Most likely bugs.** Off by one at the last `mt` or `nt`; the wrong bias source at a block boundary; the preload burst not flagged; `in_valid` not aligned to RD_LAT; a shift before FLUSH_LAT; `ub_base` not reset for a new `nt`; a deadlock in HOLD.
+- **Random test.** 500 layers with M_T and N_T from 1 to 8, K from 1 to 64, and random neighbour delays. The event list must equal the schedule model's.
+- **Assertions.** `mxu_check`, with the FSM as the driver. `swap` only when `nxt_valid` is high. Exactly one discarded burst per layer. `rb_last` only during the final tile's burst. `in_valid` is high exactly K times per tile. Every read address is below 8,192. A watchdog: `busy` falls within a bounded time when the neighbours are eventually ready.
+- **Must hit.** Every state and all 12 transitions; HOLD waiting for buffer space; HOLD waiting for the next block; bias from CURRENT, from NEXT and zero; the overflow error.
+- **Static check.** No DSP, which confirms no multiplier was inferred, and no block RAM.
+- **Done when** the tests pass and the transition cover counters are all nonzero.
+
+Directed tests:
+
+1. One tile: M_T = 1, N_T = 1.
+2. M_T = 3 with N_T = 1, and M_T = 1 with N_T = 3, to separate the two loop boundaries.
+3. K = 1 and K = 1,024.
+4. The next block arrives 2,000 cycles late at a boundary. The FSM waits in HOLD and then proceeds.
+5. `can_take_tile` held low for 1,000 cycles. The FSM waits and loses nothing.
+6. A shape whose addresses overflow raises `err_set`.
+7. Two layers in a row with no reset between them.
+
+### 6.11 accel_top
+
+- **Bench.** `tb/ctrl/accel_top/tb_accel_top.sv`. A `run_layer` task follows the twelve steps of the one-layer sequence in `docs/architecture.md`, section 8, with `axil_master` as the driver and `axis_src` and `axis_sink` as the DMA. The scoreboard compares `o_img` word for word and checks where `tlast` fell. `mxu_check` and `axis_check` watch their interfaces. Everything runs with the real `mxu`.
+- **Most likely bugs.** `a_word`, `w_word` and `in_valid` misaligned by a cycle; the bias mux picking the wrong source; scales from the wrong block at a boundary; stream words leaking to the wrong destination; residue from the previous layer; a deadlock under backpressure.
+- **Random test.** The 50 `layer_rand_*` sets, each under three stall profiles: none, light and heavy. Ten sets run in CI and all 150 runs locally.
+- **Assertions.** The checkers. `tlast` exactly once per layer. DONE only after `last_sent`. No X on `m_axis` when valid.
+- **Must hit.** CNT_WAIT_WB above zero in some run; CNT_WAIT_OUT above zero in some run; a block swap while the weight stream is stalled; a layer with K below 10; N_T = 1; M_T = 1.
+- **Static check.** Synthesis of `accel_top`: 66 DSP48E1, 21 RAMB36E1, no latches, timing met at 10 ns.
+- **Done when** every directed and random run passes with the real `mxu`, and the counter identities below hold in each.
+
+Counter identities checked at the end of every run:
+
+| Counter | Must equal |
+| --- | --- |
+| CNT_TILES | M_T · N_T |
+| CNT_ACC | M_T · N_T · K |
+| CNT_SHIFT | 8 · (M_T · N_T + 1), the extra burst being the preload |
+| CNT_OUT_WORDS | M_T · N |
+
+Directed tests:
+
+1. `layer_single`, `layer_mid` and `layer_demo1`.
+2. Two different layers back to back with no reset. The second is still bit-exact.
+3. A soft reset in the middle of a layer, then a clean layer.
+4. The weight stream offered before START, and offered 1,000 cycles after START.
+5. The sink stalled for 5,000 cycles mid-layer. The run resumes and finishes correctly.
+6. An illegal shape: ERROR is set, nothing moves on either stream, and the next legal layer works.
+
+## 7. After simulation
+
+Post-synthesis, L3:
+
+1. Utilization: 66 DSP48E1 and 21 RAMB36E1 in `accel_top`, plus whatever the DMA adds.
+2. Timing: met at 10 ns first, then at 8 ns.
+3. Netlist simulation: `layer_single` and `layer_mid` run on the post-synthesis functional netlist with the same bench and give the same result. This catches DSP and block RAM register settings that differ from what the RTL simulation assumed.
+4. Clock-domain report: the design has one clock, so any crossing the tool reports is a bug.
+
+On the board, L4:
+
+1. DMA loopback: 1 MiB, 1,000 round trips, bit-exact.
+2. CAPS reads the expected constants.
+3. `layer_single`, `layer_mid`, then the three demo layers, each bit-exact against the golden output.
+4. Counters match simulation: CNT_TILES, CNT_ACC, CNT_SHIFT and CNT_OUT_WORDS equal the values from simulating the same layer. CNT_CYCLES and the wait counters may differ, because the real DMA's timing is not the model's.
+5. Soak: the demo batch 10,000 times with zero mismatches, at 100 MHz and again at 125 MHz.
+6. Negative: an illegal shape sets ERROR on hardware and the next layer still runs.
+
+## 8. Software
+
+- **Golden model and packers.** Pytest files next to each package in `model/`. CI runs `pytest model`.
+- **Driver.** Tested on the board against a stub IP: an AXI4-Lite slave with 16 registers whose STATUS reads DONE = 1 after any START write, with a stream FIFO as the data path. `tpu_run_layer` with M_TILES = 2, K = 8, N_TILES = 1 sends 16 weight words and gets them back as 16 output words.
+- **`tpu_reorder`.** Compiled and run on the host against `sw/demo/data/reorder_test.h`.
+
+## 9. Summary
+
+| Module | Unit bench | Static check | Also exercised in |
+| --- | --- | --- | --- |
+| `pe` | `tb_pe` | 1 DSP48E1, no CARRY4 | `tb_mxu`, top level, board |
+| `mxu` | `tb_mxu` | 64 DSP48E1, 8 ns | Top level, board |
+| `ub` | `tb_ub` | 16 RAMB36E1 | Top level, board |
+| `wload` | `tb_wload` | Parameter sets in flip-flops | Top level, board |
+| `wb_pair` | `tb_wb_pair`, `tb_wload` | 4 RAMB36E1 | Top level, board |
+| `res_buf` | `tb_res_buf` | LUT RAM only | Top level, board |
+| `epilogue` | `tb_epilogue` | 2 DSP48E1 | Top level, board |
+| `out_fifo` | `tb_out_fifo` | 1 RAMB36E1 | Top level, board |
+| `regfile` | `tb_regfile` | No DSP, no block RAM | Top level, board |
+| `layer_fsm` | `tb_layer_fsm` | No DSP, no block RAM | Top level, board |
+| `accel_top` | `tb_accel_top` | 66 DSP48E1, 21 RAMB36E1, 10 ns | Netlist run, board |
