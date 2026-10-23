@@ -23,10 +23,6 @@ Steps:
 - Board: Cora Z7-07S, part `xc7z007sclg400-1`, Digilent board files, the one pinned Vivado and Vitis version.
 - PS settings: `docs/architecture.md`, section 7. FCLK_CLK0 at 100 MHz, M_AXI_GP0 enabled.
 
-## Done when
-
-A second person goes from a fresh clone to a blinking LED and a UART message using only `hw/bd_d1.tcl` and the README.
-
 ## Out of scope
 
 - The AXI DMA, HP0 and the loopback test.
