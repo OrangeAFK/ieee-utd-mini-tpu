@@ -24,9 +24,3 @@ Train the demo MLP, 784-128-64-10, quantize it to the seven inputs `layer()` tak
 - `pytest model/export` passes in CI with the skip line removed.
 - `docs/model_report.md` shows float accuracy and golden-model accuracy over the 10,000 test images, and the largest |sum| seen per layer. No sum passes INT32; any sum at or beyond 2^24 is reported.
 - `model/export/mlp_int8.npz` is committed, and `layer_demo1`, `layer_demo2` and `layer_demo3` are regenerated from it and committed.
-
-## Out of scope
-
-- Any change to `layer()`.
-- A CNN or any network other than the 784-128-64-10 MLP.
-- C headers for the board and the UART checker.
