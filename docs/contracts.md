@@ -137,7 +137,7 @@ AXI4-Lite, 32-bit data. The base address comes from Vivado's address editor; sof
 | Offset | Name | Access | Bits |
 | --- | --- | --- | --- |
 | 0x00 | CTRL | write | 0 START (self-clearing). 1 SOFT_RESET (self-clearing). 2 DEST: 0 sends `s_axis` to the unified buffer, 1 to the weight loader. 3 UB_WR_RST (self-clearing) |
-| 0x04 | STATUS | read | 0 BUSY. 1 DONE, sticky, cleared by START. 2 ERROR. 15:8 FSM state for debug |
+| 0x04 | STATUS | read | 0 BUSY. 1 DONE, sticky, cleared by START. 2 ERROR, sticky, cleared by a legal START. 15:8 FSM state for debug |
 | 0x08 | M_TILES | read/write | 15:0 = M / 8 |
 | 0x0C | K | read/write | 10:0 = K, 1 to 1,024 |
 | 0x10 | N_TILES | read/write | 15:0 = N / 8 |
@@ -151,4 +151,4 @@ AXI4-Lite, 32-bit data. The base address comes from Vivado's address editor; sof
 | 0x34 | CNT_TILES | read | Tiles completed |
 | 0x38 | CNT_OUT_WORDS | read | Words sent on `m_axis` |
 
-Counters are 32-bit and clear on START. ERROR is set by an illegal shape at START (K outside 1 to 1,024, or a tile count of 0) or by a unified-buffer address overflow during the run. MAC count is 64 × CNT_ACC; utilization is CNT_ACC / CNT_CYCLES.
+Counters are 32-bit and clear on START. ERROR is set by an illegal shape at START (K outside 1 to 1,024, or a tile count of 0) or by a unified-buffer address overflow during the run. An illegal shape never starts, so DONE stays clear; an overflow lets the layer finish, so DONE and ERROR are both set and the results are invalid. MAC count is 64 × CNT_ACC; utilization is CNT_ACC / CNT_CYCLES.

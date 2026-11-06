@@ -13,8 +13,8 @@
 //   nxt_valid      in     1      from wload: a complete block waits in the idle half
 //   can_take_tile  in     1      from res_buf: at least 8 entries free
 //   last_sent      in     1      from out_fifo: the tlast word was accepted
-//   ub_rd_addr     out    13     ub_base + k
-//   wb_rd_addr     out    10     k
+//   ub_rd_addr     out    13     low 13 bits of ub_base + kc
+//   wb_rd_addr     out    10     kc
 //   in_valid       out    1      to mxu and regfile: the read enable delayed RD_LAT cycles
 //   shift_en       out    1      to mxu and regfile: high for 8 cycles in PRELOAD and SHIFT
 //   bias_sel       out    2      bias mux source: 0 CURRENT, 1 NEXT, 2 or 3 zero
@@ -34,17 +34,23 @@
 //   SHIFT_LAT      param  int    mxu_pkg::SHIFT_LAT
 //
 // Behaviour
-//   State: the state register; counters nt, mt, k; ub_base (14 bits); a small counter for
-//   FLUSH and for the 8 shift cycles; a first-block flag. last_mt = (mt == m_tiles - 1),
-//   last_nt = (nt == n_tiles - 1). Outputs not named in a state are 0.
+//   State: the state register; counters nt, mt, kc (the input index; the port k is K);
+//   ub_base (14 bits); a small counter for FLUSH and for the 8 shift cycles; a first-block
+//   flag. last_mt = (mt == m_tiles - 1), last_nt = (nt == n_tiles - 1). Outputs not named in
+//   a state are 0, except in_valid, which trails the reads by RD_LAT and so spills into the
+//   first cycles of FLUSH.
 //   1. IDLE (code 0). busy = 0. On start: nt = mt = 0, ub_base = 0, first = 1; go to WAIT_BLK.
 //   2. WAIT_BLK (1). ev_wait_wb = 1. When nxt_valid: go to SWAP.
 //   3. SWAP (2). swap = 1 for one cycle. Next: PRELOAD if first (then clear first), else ACC.
 //   4. PRELOAD (3). 8 cycles: shift_en = 1, shift_idx = 0 to 7, bias_sel = CURRENT,
 //      rb_discard = 1. Then go to ACC.
-//   5. ACC (4). k runs 0 to K-1, one per cycle: ub_rd_addr = ub_base + k, wb_rd_addr = k.
+//   5. ACC (4). kc runs 0 to K-1, one per cycle: ub_rd_addr = ub_base + kc, wb_rd_addr = kc.
 //      in_valid follows each read RD_LAT cycles later, so it lands with the data.
-//      On entry, if ub_base + K > 8,192, pulse err_set; keep running, results are invalid.
+//      On entry, if ub_base + K > 8,192 (compare in 15 bits), pulse err_set. Nothing else
+//      changes: all K reads and K in_valid pulses still happen, the layer runs on to DRAIN
+//      and done_set still pulses, so DONE and ERROR end up both set. ub_rd_addr is the low
+//      13 bits of ub_base + kc, so it wraps; its value is don't-care and the results are
+//      invalid. err_set may pulse again on later tiles; ERROR is sticky.
 //      After K reads: go to FLUSH.
 //   6. FLUSH (5). Idle until FLUSH_LAT cycles have passed since the last in_valid of the
 //      tile. Then go to HOLD.

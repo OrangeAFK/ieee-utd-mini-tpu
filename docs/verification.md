@@ -282,7 +282,7 @@ The FSM is tested alone first, because a sequencing bug seen only at the top lev
 - **Bench.** `tb/ctrl/layer_fsm/tb_layer_fsm.sv`. Small models stand in for the neighbours: `nxt_valid` rises a random time after each `swap`, `can_take_tile` toggles at random, and `last_sent` pulses a random time after the final shift. A monitor records every read address, shift burst, bias choice, flag and swap. The reference is a schedule model: a plain nested loop in the bench that lists the events a layer of that shape must produce, in order.
 - **Most likely bugs.** Off by one at the last `mt` or `nt`; the wrong bias source at a block boundary; the preload burst not flagged; `in_valid` not aligned to RD_LAT; a shift before FLUSH_LAT; `ub_base` not reset for a new `nt`; a deadlock in HOLD.
 - **Random test.** 500 layers with M_T and N_T from 1 to 8, K from 1 to 64, and random neighbour delays. The event list must equal the schedule model's.
-- **Assertions.** `mxu_check`, with the FSM as the driver. `swap` only when `nxt_valid` is high. Exactly one discarded burst per layer. `rb_last` only during the final tile's burst. `in_valid` is high exactly K times per tile. Every read address is below 8,192. A watchdog: `busy` falls within a bounded time when the neighbours are eventually ready.
+- **Assertions.** `mxu_check`, with the FSM as the driver. `swap` only when `nxt_valid` is high. Exactly one discarded burst per layer. `rb_last` only during the final tile's burst. `in_valid` is high exactly K times per tile. For a legal shape (M_T · K at most 8,192), every read address equals the schedule model's. For an overflow shape, addresses are not checked. `err_set` pulses if and only if the shape overflows, and before the first read that would wrap. A range check on the 13-bit `ub_rd_addr` proves nothing, because it cannot show 8,192 or more. A watchdog: `busy` falls within a bounded time when the neighbours are eventually ready.
 - **Must hit.** Every state and all 12 transitions; HOLD waiting for buffer space; HOLD waiting for the next block; bias from CURRENT, from NEXT and zero; the overflow error.
 - **Static check.** No DSP, which confirms no multiplier was inferred, and no block RAM.
 - **Done when** the tests pass and the transition cover counters are all nonzero.
@@ -294,7 +294,7 @@ Directed tests:
 3. K = 1 and K = 1,024.
 4. The next block arrives 2,000 cycles late at a boundary. The FSM waits in HOLD and then proceeds.
 5. `can_take_tile` held low for 1,000 cycles. The FSM waits and loses nothing.
-6. A shape whose addresses overflow raises `err_set`.
+6. M_T = 8 with K = 1,024 (exactly 8,192 words) raises no `err_set`. M_T = 9 with K = 1,024 raises it, and the layer still reaches `done_set` and IDLE. The data is not compared.
 7. Two layers in a row with no reset between them.
 
 ### 6.11 accel_top

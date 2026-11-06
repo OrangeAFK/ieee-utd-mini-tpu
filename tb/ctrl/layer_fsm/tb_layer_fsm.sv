@@ -12,7 +12,11 @@
 //              docs/architecture.md, section 6.6.
 // Assertions   mxu_check with the FSM as the driver. swap only when nxt_valid is high.
 //              Exactly one discarded burst per layer. rb_last only during the final tile's
-//              burst. in_valid high exactly K times per tile. Every read address below 8,192.
+//              burst. in_valid high exactly K times per tile. For a legal shape (M_T * K at most
+//              8,192), every read address equals the schedule model's. For an overflow shape,
+//              addresses are not checked. err_set pulses iff the shape overflows, before the
+//              first read that would wrap. (The 13-bit ub_rd_addr cannot show 8,192, so do not
+//              range-check the port.)
 //              Watchdog: busy falls within a bounded time once the neighbours are ready.
 // Must hit     every state and all 12 transitions; HOLD waiting for buffer space; HOLD
 //              waiting for the next block; bias from CURRENT, NEXT and zero; the overflow error.
@@ -105,7 +109,8 @@ module tb_layer_fsm;
   task automatic test_no_space();
   endtask
 
-  // 6. A shape with M_T * K > 8,192; fails unless err_set pulses.
+  // 6. M_T = 8, K = 1,024 (8,192 words); fails if err_set pulses. M_T = 9, K = 1,024; fails unless
+  //    err_set pulses, done_set pulses once and the FSM returns to IDLE. Data is not compared.
   task automatic test_overflow();
   endtask
 

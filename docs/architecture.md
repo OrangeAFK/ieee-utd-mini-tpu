@@ -132,7 +132,7 @@ res_buf entry (279 bits) {last, sh[5:0], m0[15:0], row[255:0]}, row lane j = bit
 | `wl_valid` | 1 | demux | `wload` | `s_axis_tvalid & dest` |
 | `wl_ready` | 1 | `wload` | demux | Loader can take a word |
 | `s_axis_tready` | 1 | demux | DMA | `dest ? wl_ready : 1` |
-| `ub_rd_addr` | 13 | `layer_fsm` | `ub` | `ub_base + k` |
+| `ub_rd_addr` | 13 | `layer_fsm` | `ub` | Low 13 bits of `ub_base` + k |
 | `a_word` | 64 | `ub` | `mxu` | Activation word, RD_LAT after its address |
 | `wb_rd_addr` | 10 | `layer_fsm` | `wb_pair` | `k` |
 | `w_word` | 64 | `wb_pair` | `mxu` | Weight word, RD_LAT after its address |
@@ -288,8 +288,8 @@ The sequencer. It walks the tiles of a layer, issues one read address per cycle 
 | `nxt_valid` | in | 1 | From `wload` |
 | `can_take_tile` | in | 1 | From `res_buf` |
 | `last_sent` | in | 1 | From `out_fifo` |
-| `ub_rd_addr` | out | 13 | `ub_base + k` |
-| `wb_rd_addr` | out | 10 | `k` |
+| `ub_rd_addr` | out | 13 | Low 13 bits of `ub_base` + `kc` |
+| `wb_rd_addr` | out | 10 | `kc` |
 | `in_valid` | out | 1 | The read enable delayed by RD_LAT, so it lands with the data |
 | `shift_en` | out | 1 | High for 8 cycles in PRELOAD and SHIFT |
 | `bias_sel`, `shift_idx` | out | 2, 3 | Bias source and channel c during a shift |
@@ -298,7 +298,7 @@ The sequencer. It walks the tiles of a layer, issues one read address per cycle 
 | `busy`, `done_set`, `err_set`, `fsm_state` | out | 1, 1, 1, 8 | Status to `regfile` |
 | `ev_wait_wb`, `ev_wait_out`, `ev_tile` | out | 1 each | Counter enables |
 
-State: the state register; counters `nt`, `mt`, `k`; `ub_base` (14 bits); a small counter for FLUSH and for the 8 shift cycles; a first-block flag.
+State: the state register; counters `nt`, `mt`, `kc` (the input index; the port `k` is K); `ub_base` (14 bits); a small counter for FLUSH and for the 8 shift cycles; a first-block flag.
 
 | State | Code | Each cycle | Leaves when, and where to |
 | --- | --- | --- | --- |
@@ -306,7 +306,7 @@ State: the state register; counters `nt`, `mt`, `k`; `ub_base` (14 bits); a smal
 | WAIT_BLK | 1 | `ev_wait_wb` = 1 | `nxt_valid`: go to SWAP |
 | SWAP | 2 | `swap` = 1 | After 1 cycle: PRELOAD for the first block, ACC for later ones |
 | PRELOAD | 3 | `shift_en` = 1, `rb_discard` = 1, bias from CURRENT | After 8 cycles: go to ACC |
-| ACC | 4 | Read `ub` at `ub_base + k` and `wb_pair` at `k`; `k` + 1 | K reads issued: go to FLUSH |
+| ACC | 4 | Read `ub` at `ub_base + kc` and `wb_pair` at `kc`; `kc` + 1 | K reads issued: go to FLUSH |
 | FLUSH | 5 | Idle | FLUSH_LAT cycles after the last `in_valid`: go to HOLD |
 | HOLD | 6 | `ev_wait_out` or `ev_wait_wb` = 1 | `can_take_tile`, and `nxt_valid` too if this is the last `mt` of a non-final `nt`: go to SHIFT |
 | SHIFT | 7 | `shift_en` = 1; `shift_idx` counts 0 to 7; `rb_last` = 1 on the final tile | After 8 cycles: see the exit rule |
@@ -318,7 +318,7 @@ State: the state register; counters `nt`, `mt`, `k`; `ub_base` (14 bits); a smal
 - **Exit rule from SHIFT.** Not the last `mt`: `mt` + 1, `ub_base` + K, go to ACC. Last `mt` of a non-final `nt`: `nt` + 1, `mt` = 0, `ub_base` = 0, go to SWAP. Final tile: go to DRAIN.
 - **Rows leaving at a block boundary.** The bias comes from NEXT, but the `m0` and `sh` stored with the rows leaving come from CURRENT. `res_buf` reads `cur_m0` and `cur_sh` during the burst, before the swap.
 - **Counter enables.** In HOLD, `ev_wait_out` is high while `can_take_tile` is low, and `ev_wait_wb` is high while the FSM needs `nxt_valid` and it is low. `ev_tile` is high on the last cycle of each SHIFT burst, never for PRELOAD.
-- **Overflow.** If `ub_base` + K would pass 8,192, pulse `err_set`. The layer's results are then invalid.
+- **Overflow.** On entry to ACC, if `ub_base` + K is above 8,192 (compared in 15 bits), pulse `err_set`. Nothing else changes: all K reads and `in_valid` pulses still happen, and the layer runs on to DRAIN, so DONE and ERROR both end up set. `ub_rd_addr` is the low 13 bits of `ub_base` + `kc`, so it wraps; its value is don't-care, and the driver must discard the results. `err_set` may pulse again on later tiles, because ERROR is sticky.
 - **Honour the constants.** FLUSH_LAT and SHIFT_LAT come from `mxu_pkg`, RD_LAT from the buffers. None is hard-coded.
 
 The 12 transitions: IDLE→WAIT_BLK, WAIT_BLK→SWAP, SWAP→PRELOAD, SWAP→ACC, PRELOAD→ACC, ACC→FLUSH, FLUSH→HOLD, HOLD→SHIFT, SHIFT→ACC, SHIFT→SWAP, SHIFT→DRAIN, DRAIN→IDLE.
@@ -512,7 +512,7 @@ Reference design, K words:
 | 8 | Driver | Write CTRL with DEST = 1 and START = 1 |
 | 9 | `accel_top` | Runs every tile; the weight stream stalls and resumes on its own at each block swap |
 | 10 | `accel_top`, DMA | The word with `tlast` is accepted on `m_axis` |
-| 11 | Driver | STATUS.DONE reads 1; poll both DMA channels until idle |
+| 11 | Driver | STATUS.DONE reads 1 and ERROR reads 0; poll both DMA channels until idle |
 | 12 | Driver | Invalidate the cache over `o_img`; read the counters |
 
 - Steps 1 to 3 load the activations. They happen once per layer and do not overlap compute.
@@ -562,7 +562,7 @@ void tpu_read_counters(tpu_counters_t *c);
 
 `tpu_run_layer`:
 
-1. Check that m_tiles · k is at most 8,192, because the hardware does not. Then write M_TILES, K, N_TILES and QPARAM.
+1. Check that m_tiles · k is at most 8,192, because START does not check it; the FSM only flags an overflow after the layer has started. Then write M_TILES, K, N_TILES and QPARAM.
 2. Compute `w_words = n_tiles * (k + 8)` and `o_words = m_tiles * n_tiles * 8`. Flush the cache over both buffers.
 3. Arm the receive: `XAxiDma_SimpleTransfer` on `o_img`, `o_words * 8` bytes, `XAXIDMA_DEVICE_TO_DMA`.
 4. Write CTRL with DEST = 1. Start the send: `XAxiDma_SimpleTransfer` on `w_img`, `w_words * 8` bytes, `XAXIDMA_DMA_TO_DEVICE`.
