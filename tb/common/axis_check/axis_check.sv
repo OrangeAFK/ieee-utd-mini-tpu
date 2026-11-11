@@ -50,4 +50,24 @@ module axis_check #(
   input  logic         tlast
 );
 
+  bit stalled = 0;
+  logic [W-1:0] held_data;
+  logic held_last;
+  always @(posedge clk) begin
+    if (rst || !enable) stalled = 0;
+    else begin
+      if (stalled) begin
+        if (tvalid !== 1'b1) $fatal(1, "%s rule 1 at %0t: valid dropped", NAME, $time);
+        if ({tlast, tdata} !== {held_last, held_data})
+          $fatal(1, "%s rule 2 at %0t: data/last changed: %h -> %h",
+                 NAME, $time, {held_last, held_data}, {tlast, tdata});
+      end
+      if (tvalid && $isunknown({tlast, tdata}))
+        $fatal(1, "%s rule 3 at %0t: unknown word %h", NAME, $time, {tlast, tdata});
+      stalled = tvalid && !tready;
+      held_data = tdata;
+      held_last = tlast;
+    end
+  end
+
 endmodule

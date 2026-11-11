@@ -49,25 +49,85 @@ package tb_pkg;
   localparam int VW = 280;
   typedef logic [VW-1:0] vec_t;
 
+  int unsigned cover_counts[string];
+  bit seeded = 0;
+  int unsigned seed_value = 1;
+
   function automatic int unsigned get_seed();
+    int unsigned seed_arg;
+    if (!seeded) begin
+      if ($value$plusargs("seed=%d", seed_value)) begin end
+      seed_arg = seed_value;
+      void'($urandom(seed_arg));
+      $display("seed = %0d", seed_value);
+      seeded = 1;
+    end
+    return seed_value;
   endfunction
 
   function automatic void check(input string tag, input vec_t got, input vec_t exp);
+    if (got !== exp)
+      $fatal(1, "%s: got %h expected %h", tag, got, exp);
   endfunction
 
   function automatic void check_known(input string tag, input vec_t val, input int width);
+    if (width < 1 || width > VW) $fatal(1, "%s: invalid width %0d", tag, width);
+    for (int i = 0; i < width; i++)
+      if ($isunknown(val[i])) $fatal(1, "%s: X/Z at bit %0d", tag, i);
   endfunction
 
   task automatic load_hex(input string path, output vec_t vals[$]);
+    int fd, line_no, scanned;
+    string line, token, extra;
+    vec_t value;
+    vals.delete();
+    fd = $fopen(path, "r");
+    if (fd == 0) $fatal(1, "load_hex: cannot open %s", path);
+    line_no = 0;
+    while ($fgets(line, fd) != 0) begin
+      line_no++;
+      scanned = $sscanf(line, "%s %s", token, extra);
+      if (scanned < 1) continue;
+      if (scanned != 1 || token.len() > VW/4) begin
+        $fclose(fd);
+        $fatal(1, "load_hex: invalid line %s:%0d", path, line_no);
+      end
+      for (int i = 0; i < token.len(); i++) begin
+        if (!((token[i] >= "0" && token[i] <= "9") ||
+              (token[i] >= "a" && token[i] <= "f") ||
+              (token[i] >= "A" && token[i] <= "F"))) begin
+          $fclose(fd);
+          $fatal(1, "load_hex: invalid hex %s:%0d", path, line_no);
+        end
+      end
+      value = '0;
+      if ($sscanf(token, "%h", value) != 1) $fatal(1, "load_hex: parse %s", path);
+      vals.push_back(value);
+    end
+    $fclose(fd);
+    if (vals.size() == 0) $fatal(1, "load_hex: empty file %s", path);
   endtask
 
   function automatic void cover_declare(input string name);
+    if (cover_counts.exists(name) != 0) $fatal(1, "duplicate cover: %s", name);
+    cover_counts[name] = 0;
   endfunction
 
   function automatic void cover_hit(input string name);
+    if (cover_counts.exists(name) == 0) $fatal(1, "undeclared cover: %s", name);
+    cover_counts[name]++;
   endfunction
 
   task automatic finish_pass();
+    bit missed;
+    missed = 0;
+    foreach (cover_counts[name]) begin
+      $display("cover %s = %0d", name, cover_counts[name]);
+      if (cover_counts[name] == 0) missed = 1;
+    end
+    if (missed) $fatal(1, "required coverage missing");
+    $display("PASS");
+    $finish;
   endtask
 
 endpackage
