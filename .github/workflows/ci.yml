@@ -19,6 +19,10 @@ jobs:
       - uses: actions/checkout@v4
       - run: sudo apt-get update && sudo apt-get install -y verilator
       - run: python3 tb/run.py sim
+      - name: Shared component seed matrix and expected failures
+        run: python3 tb/test_shared.py --skip-build
+      - name: Regression harness verdict checks
+        run: python3 -m unittest discover -s tb -p test_regression_harness.py -v
 
   pytest:
     runs-on: ubuntu-24.04
@@ -29,3 +33,4 @@ jobs:
           python-version: "3.12"
       - run: pip install -r model/requirements.txt
       - run: pytest model
+

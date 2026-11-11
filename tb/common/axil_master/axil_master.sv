@@ -42,7 +42,8 @@
 //   5. A response that never comes is a hang: $fatal after 10,000 cycles.
 //
 // Timing
-//   Drive outputs on the clock edge (nonblocking). Delays use $urandom, so the bench seed
+//   Drive task outputs on the falling edge, away from rising-edge slave sampling.
+//   Delays use $urandom, so the bench seed
 //   controls them. With max delay 0 and mode 3, a write takes about 3 cycles.
 //   Reset: all valids and readies low.
 //
@@ -98,41 +99,35 @@ module axil_master #(
     @(posedge clk);
     if (rst) $fatal(1,"axil_master: reset interrupted transaction");
   endtask
-  task automatic send_aw(input logic [AW-1:0] addr);
+  task automatic send_aw(input logic [AW-1:0] addr, input int delay_cycles);
+    repeat (delay_cycles) @(negedge clk);
     @(negedge clk);
     m_axi_awaddr = addr; m_axi_awvalid = 1;
     do tick(); while (!m_axi_awready);
     @(negedge clk); m_axi_awvalid = 0;
   endtask
-  task automatic send_w(input logic [31:0] data);
+  task automatic send_w(input logic [31:0] data, input int delay_cycles);
+    repeat (delay_cycles) @(negedge clk);
     @(negedge clk);
     m_axi_wdata = data; m_axi_wvalid = 1;
     do tick(); while (!m_axi_wready);
     @(negedge clk); m_axi_wvalid = 0;
   endtask
   task automatic write(input logic [AW-1:0] addr, input logic [31:0] data);
-    int mode;
+    int mode, aw_delay, w_delay;
     if (busy || rst) $fatal(1,"axil_master: overlapping call or reset");
     busy = 1;
     mode = order_mode == 0 ? int'($urandom_range(1,3)) : order_mode;
-    repeat (int'($urandom_range(0,max_delay))) tick();
-    case (mode)
-      1: begin
-        send_aw(addr);
-        repeat (int'($urandom_range(0,max_delay))) tick();
-        send_w(data);
-      end
-      2: begin
-        send_w(data);
-        repeat (int'($urandom_range(0,max_delay))) tick();
-        send_aw(addr);
-      end
-      3: fork
-        send_aw(addr);
-        send_w(data);
-      join
-      default: $fatal(1,"invalid order");
-    endcase
+    aw_delay = int'($urandom_range(0,max_delay));
+    w_delay = aw_delay;
+    if (mode == 1) w_delay += 1 + int'($urandom_range(0,max_delay));
+    if (mode == 2) aw_delay += 1 + int'($urandom_range(0,max_delay));
+    // Order the offers, never wait for one handshake before offering the other.
+    // A legal slave may wait for both VALIDs before asserting either READY.
+    fork
+      send_aw(addr, aw_delay);
+      send_w(data, w_delay);
+    join
     repeat (int'($urandom_range(0,max_delay))) tick();
     @(negedge clk); m_axi_bready = 1;
     do tick(); while (!m_axi_bvalid);
@@ -169,3 +164,4 @@ module axil_master #(
     end
   end
 endmodule
+

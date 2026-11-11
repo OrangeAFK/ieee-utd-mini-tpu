@@ -27,8 +27,18 @@ or unrelated simulator crash cannot pass an expected-failure test.
 These changes have **not** passed a simulator. Local execution stops because Verilator
 is unavailable. Dependency installation also fails because external DNS cannot resolve.
 No GitHub Actions runs exist on the fork as of this work session.
-The AXI-Lite master still needs its own slave-model regression, including all ordering
-modes, randomized slave readiness, timeout/error responses and reset.
+The AXI-Lite master now has an independent slave-model regression covering all ordering
+modes, randomized and coupled slave readiness, timeout/error responses and reset.
+Review found and fixed a potential deadlock: address/data order must order the offers,
+not require the first channel to handshake before offering the second. The slave model
+includes coupled readiness to reproduce this case. This regression still needs execution.
+Parameterized source tests cover W=1/8/64/280, gap=100, bubble-free gap=0 traffic,
+hex truncation and no final newline, timed sink stalls, and reset with pending data.
+The regression runner replays seeds 1/7/29 and verifies 21 expected failure cases.
+Its verdict acceptance logic passes two local Python unit tests. Python compilation and
+git diff --check also pass. These are not evidence of HDL correctness.
+The prepared CI update invokes the extended runner after the full simulation build and
+retains successful PASS/coverage output in the CI logs.
 Run the full regression and fix any compile, lint or behavioral failures before merge.
 Run the pinned Vivado toolchain and commit actual out_fifo utilization/timing reports;
 one RAMB36E1 is a target, not a measured result. Compile shared utilities with the Vivado

@@ -22,12 +22,22 @@ module tb_shared;
     if ($value$plusargs("negative=%s", negative)) begin
       if (negative == "compare") check("intentional", 1, 2);
       else if (negative == "cover_typo") cover_hit("typo");
+      else if (negative == "cover_duplicate") begin
+        cover_declare("duplicate"); cover_declare("duplicate");
+      end
+      else if (negative == "gap_range") src.set_gap_pct(101);
+      else if (negative == "ready_range") sink.set_ready_pct(-1);
+      else if (negative == "sink_index") sink.get(0,data,last);
+      else if (negative == "zero_width") check_known("invalid",0,0);
       else if (negative == "cover_miss") begin cover_declare("miss"); finish_pass(); end
       else if (negative == "width") check_known("invalid", 0, 281);
       else if (negative == "missing") load_hex("build/no-such-file.hex", values);
-      else if (negative == "empty" || negative == "malformed") begin
+      else if (negative == "empty" || negative == "malformed" ||
+               negative == "extra_token" || negative == "overwide") begin
         fd = $fopen("build/shared_negative.hex", "w");
         if (negative == "malformed") $fdisplay(fd, "12xx");
+        if (negative == "extra_token") $fdisplay(fd,"12 34");
+        if (negative == "overwide") $fdisplay(fd,"1%070h",280'(0));
         $fclose(fd);
         load_hex("build/shared_negative.hex", values);
       end else $fatal(1, "unknown negative case");
