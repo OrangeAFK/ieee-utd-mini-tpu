@@ -131,7 +131,9 @@ module tb_axil_master;
     dut.set_max_delay(0);
     for (int mode=0;mode<4;mode++) transaction(mode,mode,32'h12340000+32'(mode));
     dut.set_max_delay(8);
-    // Forces response stalls independently of random chance across many operations.
+    coupled = 1;
+    for (int mode=0;mode<4;mode++) transaction(mode,mode,32'h56780000+32'(mode));
+    // Random response delays must actually hit the response-stall cover counters.
     for (int i=0;i<256;i++) begin
       coupled = (i % 2) != 0;
       value = $urandom();

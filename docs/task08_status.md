@@ -26,7 +26,8 @@ or unrelated simulator crash cannot pass an expected-failure test.
 
 These changes have **not** passed a simulator. Local execution stops because Verilator
 is unavailable. Dependency installation also fails because external DNS cannot resolve.
-No GitHub Actions runs exist on the fork as of this work session.
+Upstream PR #5 now exists. Its latest CI run requires maintainer approval; no HDL
+test results are available yet.
 The AXI-Lite master now has an independent slave-model regression covering all ordering
 modes, randomized and coupled slave readiness, timeout/error responses and reset.
 Review found and fixed a potential deadlock: address/data order must order the offers,
@@ -48,9 +49,10 @@ Queue-mutating source/sink API calls must be made away from posedge (normally ne
 Reset discards the source's active offer and preserves only its pending queue; clear()
 discards pending words but preserves the active offer.
 
-The connected GitHub app can push the fork but receives HTTP 403 when opening an upstream
-PR. The branch comparison can be used to open the PR manually:
-https://github.com/OrangeAFK/ieee-utd-mini-tpu/compare/main...yashbhdne:ieee-utd-mini-tpu:tb/shared-components?expand=1
+The connected GitHub app can push the fork. The user opened the upstream draft PR:
+https://github.com/OrangeAFK/ieee-utd-mini-tpu/pull/5
+The CI workflow update has been pushed and verified on the remote branch. The lead
+must approve the latest run after these changes. No additional PR is needed.
 
 Task 08 is not complete until the required evidence is available. Task 02 has not been
 started, preserving the lead's requested order. No model accuracy, synthesis count or
