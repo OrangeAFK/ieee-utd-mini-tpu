@@ -79,16 +79,93 @@ module axil_master #(
   output logic          m_axi_rready
 );
 
-  task automatic write(input logic [AW-1:0] addr, input logic [31:0] data);
-  endtask
-
-  task automatic read(input logic [AW-1:0] addr, output logic [31:0] data);
-  endtask
-
+  int max_delay = 0, order_mode = 0;
+  bit busy = 0;
+  initial begin
+    m_axi_awaddr = '0; m_axi_awvalid = 0;
+    m_axi_wdata = '0; m_axi_wstrb = 4'hf; m_axi_wvalid = 0;
+    m_axi_bready = 0; m_axi_araddr = '0; m_axi_arvalid = 0; m_axi_rready = 0;
+  end
   task automatic set_max_delay(input int n);
+    if (n < 0) $fatal(1,"axil_master: negative delay");
+    max_delay = n;
   endtask
-
   task automatic set_order(input int mode);
+    if (mode < 0 || mode > 3) $fatal(1,"axil_master: invalid order");
+    order_mode = mode;
   endtask
-
+  task automatic tick();
+    @(posedge clk);
+    if (rst) $fatal(1,"axil_master: reset interrupted transaction");
+  endtask
+  task automatic send_aw(input logic [AW-1:0] addr);
+    @(negedge clk);
+    m_axi_awaddr = addr; m_axi_awvalid = 1;
+    do tick(); while (!m_axi_awready);
+    @(negedge clk); m_axi_awvalid = 0;
+  endtask
+  task automatic send_w(input logic [31:0] data);
+    @(negedge clk);
+    m_axi_wdata = data; m_axi_wvalid = 1;
+    do tick(); while (!m_axi_wready);
+    @(negedge clk); m_axi_wvalid = 0;
+  endtask
+  task automatic write(input logic [AW-1:0] addr, input logic [31:0] data);
+    int mode;
+    if (busy || rst) $fatal(1,"axil_master: overlapping call or reset");
+    busy = 1;
+    mode = order_mode == 0 ? int'($urandom_range(1,3)) : order_mode;
+    repeat (int'($urandom_range(0,max_delay))) tick();
+    case (mode)
+      1: begin
+        send_aw(addr);
+        repeat (int'($urandom_range(0,max_delay))) tick();
+        send_w(data);
+      end
+      2: begin
+        send_w(data);
+        repeat (int'($urandom_range(0,max_delay))) tick();
+        send_aw(addr);
+      end
+      3: fork
+        send_aw(addr);
+        send_w(data);
+      join
+      default: $fatal(1,"invalid order");
+    endcase
+    repeat (int'($urandom_range(0,max_delay))) tick();
+    @(negedge clk); m_axi_bready = 1;
+    do tick(); while (!m_axi_bvalid);
+    if (m_axi_bresp !== 0) $fatal(1,"axil_master: bad BRESP %b",m_axi_bresp);
+    @(negedge clk); m_axi_bready = 0;
+    busy = 0;
+  endtask
+  task automatic read(input logic [AW-1:0] addr, output logic [31:0] data);
+    if (busy || rst) $fatal(1,"axil_master: overlapping call or reset");
+    busy = 1;
+    repeat (int'($urandom_range(0,max_delay))) tick();
+    @(negedge clk); m_axi_araddr = addr; m_axi_arvalid = 1;
+    do tick(); while (!m_axi_arready);
+    @(negedge clk); m_axi_arvalid = 0;
+    repeat (int'($urandom_range(0,max_delay))) tick();
+    @(negedge clk); m_axi_rready = 1;
+    do tick(); while (!m_axi_rvalid);
+    if (m_axi_rresp !== 0 || $isunknown(m_axi_rdata))
+      $fatal(1,"axil_master: bad read response");
+    data = m_axi_rdata;
+    @(negedge clk); m_axi_rready = 0;
+    busy = 0;
+  endtask
+  int transaction_cycles = 0;
+  always @(posedge clk) begin
+    if (!busy) transaction_cycles = 0;
+    else begin
+      transaction_cycles++;
+      if (transaction_cycles >= 10000) $fatal(1,"axil_master: transaction timeout");
+    end
+    if (rst) begin
+      m_axi_awvalid = 0; m_axi_wvalid = 0; m_axi_bready = 0;
+      m_axi_arvalid = 0; m_axi_rready = 0;
+    end
+  end
 endmodule
