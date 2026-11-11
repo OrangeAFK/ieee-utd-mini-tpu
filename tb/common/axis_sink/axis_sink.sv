@@ -53,28 +53,62 @@ module axis_sink #(
   input  logic         tlast
 );
 
+  typedef struct packed {logic last; logic [W-1:0] data;} word_t;
+  word_t collected[$];
+  int ready_pct = 100;
+  int stall_left = 0;
+  initial tready = 0;
+
   task automatic set_ready_pct(input int pct);
+    if (pct < 0 || pct > 100) $fatal(1, "axis_sink: invalid ready percent");
+    ready_pct = pct;
   endtask
 
   task automatic stall(input int cycles);
+    if (cycles < 0) $fatal(1, "axis_sink: negative stall");
+    stall_left = cycles;
   endtask
 
   task automatic wait_words(input int n);
+    if (n < 0) $fatal(1, "axis_sink: negative word count");
+    while (collected.size() < n) @(negedge clk);
   endtask
 
   task automatic wait_last();
+    while (last_index() < 0) @(negedge clk);
   endtask
 
   function automatic int num_words();
+    return collected.size();
   endfunction
 
   task automatic get(input int idx, output logic [W-1:0] data, output logic last);
+    if (idx < 0 || idx >= collected.size()) $fatal(1, "axis_sink: invalid index %0d", idx);
+    data = collected[idx].data;
+    last = collected[idx].last;
   endtask
 
   function automatic int last_index();
+    foreach (collected[i]) if (collected[i].last) return i;
+    return -1;
   endfunction
 
   task automatic clear();
+    collected.delete();
   endtask
+
+  always @(posedge clk) begin
+    if (rst) tready <= 0;
+    else begin
+      if (tvalid && tready) begin
+        if ($isunknown({tlast, tdata})) $fatal(1, "axis_sink: unknown accepted word");
+        collected.push_back({tlast, tdata});
+      end
+      if (stall_left > 0) begin
+        tready <= 0;
+        stall_left--;
+      end else tready <= int'($urandom_range(0, 99)) < ready_pct;
+    end
+  end
 
 endmodule

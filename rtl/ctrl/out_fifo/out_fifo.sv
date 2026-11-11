@@ -63,4 +63,48 @@ module out_fifo #(
   output logic        ev_out_word
 );
 
+  localparam int PW = (DEPTH > 1) ? $clog2(DEPTH) : 1;
+  localparam int CW = $clog2(DEPTH + 1);
+  (* ram_style = "block" *) logic [64:0] mem [0:DEPTH-1];
+  logic [PW-1:0] wr_ptr, rd_ptr;
+  logic [CW-1:0] count;
+  logic push_word, pop_word, fetch_word;
+
+  assign of_ready = count < CW'(DEPTH);
+  assign push_word = ep_valid && of_ready;
+  assign pop_word = m_axis_tvalid && m_axis_tready;
+  assign ev_out_word = pop_word;
+  assign last_sent = pop_word && m_axis_tlast;
+  // count includes the output register, so an unread RAM word must remain.
+  assign fetch_word = (!m_axis_tvalid || m_axis_tready) &&
+                      (count > CW'(m_axis_tvalid));
+
+  // Synchronous RAM read; the output register is the fall-through head.
+  // Do not reset memory or its data output register, preserving block RAM inference.
+  always_ff @(posedge clk) begin
+    if (!rst) begin
+      if (push_word) mem[wr_ptr] <= {ep_last, ep_word};
+      if (fetch_word) {m_axis_tlast, m_axis_tdata} <= mem[rd_ptr];
+    end
+  end
+
+  always_ff @(posedge clk) begin
+    if (rst) begin
+      wr_ptr <= '0;
+      rd_ptr <= '0;
+      count <= '0;
+      m_axis_tvalid <= 0;
+    end else begin
+      case ({push_word, pop_word})
+        2'b10: count <= count + 1'b1;
+        2'b01: count <= count - 1'b1;
+        default: ;
+      endcase
+      if (push_word) wr_ptr <= (wr_ptr == PW'(DEPTH-1)) ? '0 : wr_ptr + 1'b1;
+      if (fetch_word) rd_ptr <= (rd_ptr == PW'(DEPTH-1)) ? '0 : rd_ptr + 1'b1;
+      if (fetch_word) m_axis_tvalid <= 1;
+      else if (pop_word) m_axis_tvalid <= 0;
+    end
+  end
+
 endmodule

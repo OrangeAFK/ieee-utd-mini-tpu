@@ -54,19 +54,57 @@ module axis_src #(
   output logic         tlast
 );
 
+  typedef struct packed {logic last; logic [W-1:0] data;} word_t;
+  word_t pending[$];
+  word_t next_word;
+  int gap_pct = 0;
+  initial begin
+    tvalid = 0;
+    tdata = '0;
+    tlast = 0;
+    if (W < 1 || W > tb_pkg::VW) $fatal(1, "axis_src: invalid W");
+  end
+
   task automatic push(input logic [W-1:0] data, input logic last);
+    pending.push_back({last, data});
   endtask
 
   task automatic load_hex(input string path);
+    tb_pkg::vec_t values[$];
+    tb_pkg::load_hex(path, values);
+    foreach (values[i]) push(values[i][W-1:0], i == values.size()-1);
   endtask
 
   task automatic set_gap_pct(input int pct);
+    if (pct < 0 || pct > 100) $fatal(1, "axis_src: invalid gap percent %0d", pct);
+    gap_pct = pct;
   endtask
 
+  // Call queue-mutating tasks away from the rising edge, normally at negedge.
+  // Offered words are separate from pending; clear and reset never requeue them.
   task automatic wait_empty();
+    do @(negedge clk); while (pending.size() != 0 || tvalid);
   endtask
 
   task automatic clear();
+    pending.delete();
   endtask
+
+  always @(posedge clk) begin
+    if (rst) begin
+      tvalid <= 0;
+      tdata <= '0;
+      tlast <= 0;
+    end else if (!tvalid || tready) begin
+      if (pending.size() != 0 && int'($urandom_range(0, 99)) >= gap_pct) begin
+        next_word = pending.pop_front();
+        tdata <= next_word.data;
+        tlast <= next_word.last;
+        tvalid <= 1;
+      end else begin
+        tvalid <= 0;
+      end
+    end
+  end
 
 endmodule

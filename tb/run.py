@@ -26,6 +26,7 @@ TB_PKGS = ["tb/common/tb_pkg.sv"]
 # Parameters declared `bit` in the RTL go in BIT_PARAMS so they are passed as 1'b0 / 1'b1.
 BIT_PARAMS = {"PIPE"}
 PARAMS = {
+    "tb_source_edges": [{"W": w} for w in (1, 8, 64, 280)],
     "tb_pe": [{"PIPE": 0}, {"PIPE": 1}],
     "tb_mxu": [{"T": t, "PIPE": p} for t in (4, 8) for p in (0, 1)],
 }
@@ -99,7 +100,8 @@ def sim(names, plusargs):
                 verdict = "PASS"
             else:
                 verdict = "NO VERDICT"
-            if verdict not in ("PASS", "SKIP"):
+            # Retain PASS/coverage evidence in CI logs, not just the summary verdict.
+            if verdict != "SKIP":
                 print(r.stdout + r.stderr)
             results.append((tag, verdict))
     for tag, verdict in results:
@@ -126,3 +128,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

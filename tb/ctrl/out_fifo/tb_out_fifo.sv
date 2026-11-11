@@ -49,35 +49,101 @@ module tb_out_fifo;
     .tdata(m_axis_tdata), .tvalid(m_axis_tvalid), .tready(m_axis_tready), .tlast(m_axis_tlast)
   );
 
+  logic [64:0] expected[$];
+  logic [64:0] head_word;
+  int accepted = 0, received = 0;
+  always @(posedge clk) begin
+    if (rst) expected.delete();
+    else begin
+      check("event", vec_t'(ev_out_word), vec_t'(m_axis_tvalid && m_axis_tready));
+      check("last_sent", vec_t'(last_sent), vec_t'(m_axis_tvalid && m_axis_tready && m_axis_tlast));
+      if (m_axis_tvalid) check_known("output", vec_t'({m_axis_tlast,m_axis_tdata}), 65);
+      if (m_axis_tvalid && m_axis_tready) begin
+        if (expected.size() == 0) $fatal(1,"unexpected FIFO output");
+        head_word = expected.pop_front();
+        check("fifo order", vec_t'({m_axis_tlast,m_axis_tdata}), vec_t'(head_word));
+        received++;
+      end
+      if (ep_valid && of_ready) begin
+        if (expected.size() >= 512) $fatal(1,"FIFO overflow");
+        expected.push_back({ep_last,ep_word});
+        accepted++;
+      end
+      if (expected.size() == 512) cover_hit("full");
+      if (expected.size() == 0) cover_hit("empty");
+      if (ep_valid && of_ready && m_axis_tvalid && m_axis_tready) cover_hit("simultaneous");
+      if (ep_valid && of_ready && ep_last && expected.size() == 1) cover_hit("first_last");
+    end
+  end
   initial begin
-    $display("SKIP: not implemented"); $finish;
+    #20000000;
+    $fatal(1,"FIFO watchdog");
+  end
+  task automatic drain();
+    u_src.wait_empty();
+    while (expected.size() != 0 || m_axis_tvalid) @(negedge clk);
+  endtask
+  task automatic reset_fifo();
+    @(negedge clk);
+    u_src.clear();
+    rst = 1;
+    repeat (3) @(negedge clk);
+    rst = 0;
+  endtask
+  initial begin
+    rst = 1;
     void'(get_seed());
+    cover_declare("full");
+    cover_declare("empty");
+    cover_declare("simultaneous");
+    cover_declare("first_last");
+    cover_declare("reset");
+    repeat (3) @(negedge clk);
+    rst = 0;
     test_fill_and_drain();
     test_single_word();
     test_last_word();
     test_reset_midway();
     test_random();
+    $display("accepted = %0d received = %0d",accepted,received);
     finish_pass();
   end
 
-  // 1. Sink stalled, write until of_ready drops, then drain; fails unless exactly 512 words enter and all leave in order.
   task automatic test_fill_and_drain();
+    u_sink.set_ready_pct(0);
+    repeat (3) @(negedge clk);
+    for (int i=0;i<512;i++) u_src.push(64'(i),i==511);
+    u_src.wait_empty();
+    repeat (4) @(negedge clk);
+    check("full ready",vec_t'(of_ready),0);
+    check("full occupancy",vec_t'(expected.size()),512);
+    u_sink.set_ready_pct(100);
+    drain();
   endtask
-
-  // 2. One word into an empty FIFO; fails if m_axis_tvalid never rises without an extra request or the word differs.
   task automatic test_single_word();
+    u_src.push(64'h123456789abcdef0,1);
+    drain();
   endtask
-
-  // 3. A word with last among others; fails unless tlast rises with that word only and last_sent pulses exactly once.
   task automatic test_last_word();
+    for (int i=0;i<16;i++) u_src.push(64'(i),i==7 || i==8);
+    drain();
   endtask
-
-  // Rule 5. rst with words stored, then a clean run; fails unless m_axis_tvalid drops and only post-reset words appear.
   task automatic test_reset_midway();
+    u_sink.set_ready_pct(0);
+    repeat (3) @(negedge clk);
+    for (int i=0;i<100;i++) u_src.push(64'(i),0);
+    repeat (20) @(negedge clk);
+    reset_fifo();
+    check("reset valid",vec_t'(m_axis_tvalid),0);
+    cover_hit("reset");
+    u_sink.set_ready_pct(100);
+    test_single_word();
   endtask
-
-  // Random. 100,000 words, random stalls both sides, last on random words; fails on any order, data or last mismatch.
   task automatic test_random();
+    u_src.set_gap_pct(30);
+    u_sink.set_ready_pct(40);
+    for (int i=0;i<100000;i++)
+      u_src.push({$urandom(),$urandom()},$urandom_range(0,15)==0);
+    drain();
   endtask
-
 endmodule

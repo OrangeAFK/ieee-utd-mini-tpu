@@ -42,7 +42,8 @@
 //   5. A response that never comes is a hang: $fatal after 10,000 cycles.
 //
 // Timing
-//   Drive outputs on the clock edge (nonblocking). Delays use $urandom, so the bench seed
+//   Drive task outputs on the falling edge, away from rising-edge slave sampling.
+//   Delays use $urandom, so the bench seed
 //   controls them. With max delay 0 and mode 3, a write takes about 3 cycles.
 //   Reset: all valids and readies low.
 //
@@ -79,16 +80,88 @@ module axil_master #(
   output logic          m_axi_rready
 );
 
-  task automatic write(input logic [AW-1:0] addr, input logic [31:0] data);
-  endtask
-
-  task automatic read(input logic [AW-1:0] addr, output logic [31:0] data);
-  endtask
-
+  int max_delay = 0, order_mode = 0;
+  bit busy = 0;
+  initial begin
+    m_axi_awaddr = '0; m_axi_awvalid = 0;
+    m_axi_wdata = '0; m_axi_wstrb = 4'hf; m_axi_wvalid = 0;
+    m_axi_bready = 0; m_axi_araddr = '0; m_axi_arvalid = 0; m_axi_rready = 0;
+  end
   task automatic set_max_delay(input int n);
+    if (n < 0) $fatal(1,"axil_master: negative delay");
+    max_delay = n;
   endtask
-
   task automatic set_order(input int mode);
+    if (mode < 0 || mode > 3) $fatal(1,"axil_master: invalid order");
+    order_mode = mode;
   endtask
-
+  task automatic tick();
+    @(posedge clk);
+    if (rst) $fatal(1,"axil_master: reset interrupted transaction");
+  endtask
+  task automatic send_aw(input logic [AW-1:0] addr, input int delay_cycles);
+    repeat (delay_cycles) @(negedge clk);
+    @(negedge clk);
+    m_axi_awaddr = addr; m_axi_awvalid = 1;
+    do tick(); while (!m_axi_awready);
+    @(negedge clk); m_axi_awvalid = 0;
+  endtask
+  task automatic send_w(input logic [31:0] data, input int delay_cycles);
+    repeat (delay_cycles) @(negedge clk);
+    @(negedge clk);
+    m_axi_wdata = data; m_axi_wvalid = 1;
+    do tick(); while (!m_axi_wready);
+    @(negedge clk); m_axi_wvalid = 0;
+  endtask
+  task automatic write(input logic [AW-1:0] addr, input logic [31:0] data);
+    int mode, aw_delay, w_delay;
+    if (busy || rst) $fatal(1,"axil_master: overlapping call or reset");
+    busy = 1;
+    mode = order_mode == 0 ? int'($urandom_range(1,3)) : order_mode;
+    aw_delay = int'($urandom_range(0,max_delay));
+    w_delay = aw_delay;
+    if (mode == 1) w_delay += 1 + int'($urandom_range(0,max_delay));
+    if (mode == 2) aw_delay += 1 + int'($urandom_range(0,max_delay));
+    // Order the offers, never wait for one handshake before offering the other.
+    // A legal slave may wait for both VALIDs before asserting either READY.
+    fork
+      send_aw(addr, aw_delay);
+      send_w(data, w_delay);
+    join
+    repeat (int'($urandom_range(0,max_delay))) tick();
+    @(negedge clk); m_axi_bready = 1;
+    do tick(); while (!m_axi_bvalid);
+    if (m_axi_bresp !== 0) $fatal(1,"axil_master: bad BRESP %b",m_axi_bresp);
+    @(negedge clk); m_axi_bready = 0;
+    busy = 0;
+  endtask
+  task automatic read(input logic [AW-1:0] addr, output logic [31:0] data);
+    if (busy || rst) $fatal(1,"axil_master: overlapping call or reset");
+    busy = 1;
+    repeat (int'($urandom_range(0,max_delay))) tick();
+    @(negedge clk); m_axi_araddr = addr; m_axi_arvalid = 1;
+    do tick(); while (!m_axi_arready);
+    @(negedge clk); m_axi_arvalid = 0;
+    repeat (int'($urandom_range(0,max_delay))) tick();
+    @(negedge clk); m_axi_rready = 1;
+    do tick(); while (!m_axi_rvalid);
+    if (m_axi_rresp !== 0 || $isunknown(m_axi_rdata))
+      $fatal(1,"axil_master: bad read response");
+    data = m_axi_rdata;
+    @(negedge clk); m_axi_rready = 0;
+    busy = 0;
+  endtask
+  int transaction_cycles = 0;
+  always @(posedge clk) begin
+    if (!busy) transaction_cycles = 0;
+    else begin
+      transaction_cycles++;
+      if (transaction_cycles >= 10000) $fatal(1,"axil_master: transaction timeout");
+    end
+    if (rst) begin
+      m_axi_awvalid = 0; m_axi_wvalid = 0; m_axi_bready = 0;
+      m_axi_arvalid = 0; m_axi_rready = 0;
+    end
+  end
 endmodule
+
